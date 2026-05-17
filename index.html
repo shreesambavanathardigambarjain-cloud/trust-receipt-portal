@@ -461,18 +461,18 @@ select.filter-sel {
       <div class="nav-item" onclick="showPage('new-receipt')">
         <span class="ni">➕</span> New Receipt
       </div>
-      <div class="nav-item" onclick="showPage('receipts')">
+      <div class="nav-item" id="nav-receipts" onclick="showPage('receipts')">
         <span class="ni">📋</span> All Receipts
       </div>
 
       <div class="nav-section">Reports</div>
-      <div class="nav-item" onclick="showPage('whatsapp-log')">
+      <div class="nav-item" id="nav-walog" onclick="showPage('whatsapp-log')">
         <span class="ni">💬</span> WhatsApp Log
       </div>
-      <div class="nav-item" onclick="exportAllExcel()">
+      <div class="nav-item" id="nav-excel" onclick="exportAllExcel()">
         <span class="ni">📊</span> Export Excel
       </div>
-      <div class="nav-item" onclick="exportAllPDF()">
+      <div class="nav-item" id="nav-pdf" onclick="exportAllPDF()">
         <span class="ni">🖨️</span> Export PDF
       </div>
 
@@ -480,7 +480,7 @@ select.filter-sel {
       <div class="nav-item" id="nav-members" onclick="showPage('members')">
         <span class="ni">👥</span> Members
       </div>
-      <div class="nav-item" onclick="showPage('settings')">
+      <div class="nav-item" id="nav-settings" onclick="showPage('settings')">
         <span class="ni">⚙️</span> Settings
       </div>
     </nav>
@@ -548,7 +548,7 @@ select.filter-sel {
           <div class="card">
             <div class="card-header">
               <h3>Recent Receipts</h3>
-              <button class="btn btn-outline btn-sm" onclick="showPage('receipts')">View All</button>
+              <button class="btn btn-outline btn-sm" id="nav-receipts" onclick="showPage('receipts')">View All</button>
             </div>
             <div class="card-body" style="padding:0">
               <table id="dashboard-table">
@@ -718,8 +718,8 @@ select.filter-sel {
             <option value="failed">Failed</option>
             <option value="not-sent">Not Sent</option>
           </select>
-          <button class="btn btn-outline btn-sm" onclick="exportAllExcel()">📊 Excel</button>
-          <button class="btn btn-outline btn-sm" onclick="exportAllPDF()">🖨 PDF</button>
+          <button class="btn btn-outline btn-sm" id="nav-excel" onclick="exportAllExcel()">📊 Excel</button>
+          <button class="btn btn-outline btn-sm" id="nav-pdf" onclick="exportAllPDF()">🖨 PDF</button>
         </div>
 
         <div class="card">
@@ -1236,8 +1236,17 @@ function _startSession(member) {
     member.role.charAt(0).toUpperCase() + member.role.slice(1);
   document.getElementById('sidebar-trust-name').textContent = DB.settings.trustName;
 
-  // Hide Members nav for non-admins
+  // Role-based navigation access
   if (member.role === 'member') {
+    // Member can ONLY see Dashboard and New Receipt
+    document.getElementById('nav-members').style.display = 'none';
+    document.getElementById('nav-receipts').style.display = 'none';
+    document.getElementById('nav-walog').style.display = 'none';
+    document.getElementById('nav-excel').style.display = 'none';
+    document.getElementById('nav-pdf').style.display = 'none';
+    document.getElementById('nav-settings').style.display = 'none';
+  } else if (member.role === 'treasurer') {
+    // Treasurer cannot manage members or settings
     document.getElementById('nav-members').style.display = 'none';
   }
 
@@ -2154,6 +2163,116 @@ function _setVal(id, val) {
   if (el) el.value = val;
 }
 
+
+/* ============================================================
+   ROLE-BASED ACCESS & MEMBER-ONLY VIEW
+   ============================================================ */
+
+/* 1. Hide nav items based on role after login */
+const _origStartSession = typeof _startSession !== 'undefined' ? _startSession : null;
+
+function applyRoleAccess(role) {
+  if (role === 'member') {
+    ['nav-members','nav-receipts','nav-walog','nav-excel','nav-pdf','nav-settings']
+      .forEach(id => { const el=document.getElementById(id); if(el) el.style.display='none'; });
+    // Change "New Receipt" button behavior - auto send WA
+    const newBtn = document.querySelector('.btn-gold.btn-sm');
+    if(newBtn) newBtn.textContent = '+ New Receipt';
+  } else if (role === 'treasurer') {
+    ['nav-members'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display='none'; });
+  }
+}
+
+/* 2. Override showPage to block member from restricted pages */
+const __origShowPage = showPage;
+window.showPage = function(p) {
+  const role = DB.currentUser ? DB.currentUser.role : '';
+  const memberAllowed = ['dashboard', 'new-receipt'];
+  if (role === 'member' && !memberAllowed.includes(p)) {
+    toast('Access restricted for your role', 'danger');
+    return;
+  }
+  __origShowPage(p);
+}
+
+/* 3. Override saveReceipt - for members, always auto-send WA */
+const __origSaveReceipt = saveReceipt;
+window.saveReceipt = function() {
+  if (DB.currentUser && DB.currentUser.role === 'member') {
+    // Members always save AND send WhatsApp
+    saveAndSendWA();
+  } else {
+    __origSaveReceipt();
+  }
+}
+
+/* 4. Override renderDashboard - members see only their own receipts */
+const __origRenderDashboard = renderDashboard;
+window.renderDashboard = function() {
+  if (DB.currentUser && DB.currentUser.role === 'member') {
+    const myName = DB.currentUser.name;
+    const myReceipts = DB.receipts.filter(r => r.createdBy === myName);
+    
+    // Show member dashboard with only their receipts
+    document.getElementById('stat-total').textContent = myReceipts.length;
+    const total = myReceipts.reduce((s,r) => s + (parseFloat(r.amount)||0), 0);
+    document.getElementById('stat-amount').textContent = '₹' + total.toLocaleString('en-IN');
+    const waSent = myReceipts.filter(r => r.waDonor === 'sent').length;
+    document.getElementById('stat-wa-sent').textContent = waSent;
+    const failed = myReceipts.filter(r => r.waDonor === 'failed').length;
+    document.getElementById('stat-pending').textContent = failed;
+
+    const tbody = document.getElementById('dashboard-tbody');
+    const recent = myReceipts.slice(-5).reverse();
+    tbody.innerHTML = recent.length
+      ? recent.map(r => `
+          <tr>
+            <td><strong>${r.receiptNo}</strong></td>
+            <td>${r.donorName}</td>
+            <td><strong>₹${parseFloat(r.amount).toLocaleString('en-IN')}</strong></td>
+            <td>${formatDate(r.date)}</td>
+            <td>${waStatusBadge(r.waDonor)}</td>
+          </tr>`).join('')
+      : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:2rem">No receipts added by you yet</td></tr>';
+
+    // Hide pay method chart for members
+    document.getElementById('pay-method-chart').innerHTML = 
+      '<div style="text-align:center;padding:2rem;color:var(--muted);font-size:.85rem">Only your receipts shown</div>';
+    return;
+  }
+  __origRenderDashboard();
+}
+
+/* 5. Patch initApp to apply role access */
+const __origInitApp = initApp;
+window.initApp = function() {
+  __origInitApp();
+  if(DB.currentUser) applyRoleAccess(DB.currentUser.role);
+  
+  // For members: update the New Receipt page - hide "Save only" button, rename to auto-send
+  if(DB.currentUser && DB.currentUser.role === 'member') {
+    setTimeout(() => {
+      // Change button labels on new receipt form
+      const saveBtn = document.querySelector('[onclick="saveReceipt()"]');
+      const saveWaBtn = document.querySelector('[onclick="saveAndSendWA()"]');
+      if(saveBtn) saveBtn.style.display = 'none'; // Hide "Save only"
+      if(saveWaBtn) {
+        saveWaBtn.textContent = '💾 Save & Send WhatsApp';
+        saveWaBtn.style.background = 'var(--gold)';
+        saveWaBtn.style.color = 'var(--navy)';
+      }
+    }, 500);
+    
+    // Update stat card labels
+    setTimeout(() => {
+      const labels = document.querySelectorAll('.stat-card .label');
+      if(labels[0]) labels[0].textContent = 'My Receipts';
+      if(labels[1]) labels[1].textContent = 'My Collections';
+      if(labels[2]) labels[2].textContent = 'WA Sent';
+      if(labels[3]) labels[3].textContent = 'WA Failed';
+    }, 300);
+  }
+}
 
 </script>
 </body>
